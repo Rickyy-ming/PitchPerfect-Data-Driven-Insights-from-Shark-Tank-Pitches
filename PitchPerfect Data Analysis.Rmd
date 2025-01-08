@@ -1,0 +1,516 @@
+---
+title: "FinalProjectShark"
+author: "Ricardo Lu"
+date: "2024-11-30"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(car)
+library(caret)
+library(gridExtra)
+library(cluster)
+library(corrplot)
+library(randomForest)
+library(tree)
+library(lubridate)
+library(tidyr)
+library(tidytext)
+library(stringr)
+library(ggfortify)
+set.seed(1)  # Set seed for reproducibility
+```
+
+```{r EDA}
+#EDA on Dataset
+# Load and explore the dataset
+df <- read.csv("Dataset 3 — Shark tank pitches.csv")  # Load the dataset
+attach(df)  # Attach the dataset for easy reference
+str(df)  # Check the structure of the dataset
+summary(df)  # Summarize each column
+head(df)  # Preview the first few rows of the data
+
+# Check for missing values in the dataset
+colSums(is.na(df))  # Count missing values for each column
+
+# EDA: Explore numeric features
+numeric_features <- df %>%
+  select(where(is.numeric))  # Select only numeric columns
+
+# Plot histograms for numeric features
+for (col in colnames(numeric_features)) {
+  p <- ggplot(df, aes_string(x = col)) +
+    geom_histogram(fill = "steelblue", color = "black", bins = 30) +
+    labs(title = paste("Distribution of", col), x = col, y = "Frequency") +
+    theme_minimal()
+  print(p)
+}
+
+# Plot boxplots for numeric features to identify outliers
+for (col in colnames(numeric_features)) {
+  p <- ggplot(df, aes_string(y = col)) +
+    geom_boxplot(fill = "orange", color = "black") +
+    labs(title = paste("Boxplot of", col), y = col) +
+    theme_minimal()
+  print(p)
+}
+
+
+# Analyze categories to see which have more successful deals
+category_summary <- df %>%
+  group_by(category) %>%
+  summarise(
+    category_success = mean(deal == 1, na.rm = TRUE),  # Proportion of successful deals
+    count = n()  # Total count of occurrences
+  ) %>%
+  arrange(desc(count))  # Sort by count in descending order
+print(category_summary)
+
+# Count the number of deals
+table(deal)
+
+# Transform skewed numeric columns using log transformation
+df$valuation <- log1p(df$valuation)
+df$askedFor <- log1p(df$askedFor)
+df$exchangeForStake <- log1p(df$exchangeForStake)
+```
+
+
+
+```{r Feature Engineering}
+#Feature Engineering
+# Encode deal as numeric for machine learning algorithms
+df$deal <- as.numeric(df$deal)
+
+# Convert the Multiple.Entreprenuers variable to numeric
+df$Multiple.Entreprenuers <- as.numeric(df$Multiple.Entreprenuers)
+
+# Calculate average success rate for each category and add it to the dataset
+category_success_rate <- df %>%
+  group_by(category) %>%
+  summarise(category_success_rate = mean(deal == 1, na.rm = TRUE))
+df <- df %>%
+  left_join(category_success_rate, by = "category")  # Merge with the original dataset
+
+# Create a new feature: length of the description
+df$description_length <- nchar(df$description)
+
+# Text Analysis on Descriptions
+
+# Tokenize the description column into words
+df_tokens <- df %>%
+  select(deal, description) %>%  # Include deal column for filtering
+  unnest_tokens(word, description)  # Split descriptions into individual words
+
+# Remove stopwords (common words like "the", "and")
+data("stop_words")  # Load predefined stopwords
+df_tokens <- df_tokens %>%
+  anti_join(stop_words, by = "word")
+
+# Find the most common words in successful deals
+successful_tokens <- df_tokens %>%
+  filter(deal == 1) %>%  # Filter for successful deals
+  count(word, sort = TRUE)  # Count word frequencies and sort them
+
+# Extract the top 20 words in successful deals
+top_words <- successful_tokens %>%
+  slice_max(n, n = 20) %>%
+  pull(word)  # Extract the top words as a vector
+print(top_words)
+
+# Calculate a popularity score for each description based on top words
+df$popularity_score <- sapply(df$description, function(desc) {
+  # Tokenize description into words
+  words <- unlist(strsplit(desc, "\\s+"))
+  # Count how many top words appear in the description
+  sum(words %in% top_words)
+})
+
+# Interaction Terms
+df$interaction_term <- df$exchangeForStake * df$popularity_score  # Interaction between stake and popularity score
+
+# Popular Location Analysis
+df$city <- sapply(strsplit(df$location, ", "), function(x) x[1])  # Extract city names from the location column
+
+# Calculate success rates for each city and join with the dataset
+location_success_rate <- df %>%
+  group_by(city) %>%
+  summarise(location_success_rate = mean(deal == 1, na.rm = TRUE))
+df <- df %>%
+  left_join(location_success_rate, by = "city")
+
+# Clustering Analysis
+clustering_features <- df %>%
+  select(valuation, askedFor, exchangeForStake, Multiple.Entreprenuers, deal, popularity_score, location_success_rate, season, interaction_term, category_success_rate, description_length)
+str(clustering_features)  # Check the structure of clustering features
+
+library(corrplot)
+cor_matrix <- cor(clustering_features, use = "complete.obs")  # Use only complete cases (non-missing data)
+corrplot(cor_matrix, method = "circle", type = "upper", tl.col = "black", tl.srt = 45)
+
+# Visualize the correlation matrix with numbers
+corrplot(
+  cor_matrix,
+  method = "circle",        # Use circles to represent correlation
+  type = "upper",           # Show only the upper triangle of the matrix
+  tl.col = "black",         # Set text label color to black
+  tl.srt = 45,              # Rotate text labels
+  addCoef.col = "black",    # Add correlation coefficients with black color
+  number.cex = 0.7,         # Adjust the size of the numbers
+  col = colorRampPalette(c("blue", "white", "red"))(200)  # Custom color palette
+)
+
+```
+
+```{r PCA}
+# Perform PCA
+library(ggfortify)  # Load library for PCA visualization
+
+# Select features for clustering
+clustering_features <- df %>%
+  select(valuation, askedFor, exchangeForStake,Multiple.Entreprenuers,deal,popularity_score,location_success_rate,season,interaction_term,category_success_rate,description_length)
+
+# Scale the features
+pca_result=prcomp(clustering_features, scale=TRUE)
+
+# Visualize PCA with loadings and labels, colored by the "deal" status
+autoplot(pca_result, data = clustering_features, loadings = TRUE, loadings.label = TRUE, colour = 'deal') +
+  labs(title = "PCA of Shark Pitches", color = "Deal Status")  # Add informative title and legend
+
+# Check PCA results to explore the variance explained by components
+pca_result
+
+# Calculate the proportion of variance explained (PVE) by each principal component
+pve = (pca_result$sdev^2) / sum(pca_result$sdev^2)
+
+# Visualize the variance explained
+par(mfrow = c(1, 2))  # Arrange plots side-by-side
+plot(pve, ylim = c(0, 1), type = "b", col = "blue", pch = 16,
+     main = "Proportion of Variance Explained",
+     xlab = "Principal Components", ylab = "Proportion of Variance")  # PVE for each component
+plot(cumsum(pve), ylim = c(0, 1), type = "b", col = "blue", pch = 16,
+     main = "Cumulative Variance Explained",
+     xlab = "Principal Components", ylab = "Cumulative Proportion of Variance")  # Cumulative PVE
+```
+
+
+
+```{r K-means Clustering}
+# Prepare PCA Data
+# Create a data frame with the first two principal components and the deal status for visualization
+pca_data <- data.frame(
+  PC1 = pca_result$x[, 1],  # First principal component
+  PC2 = pca_result$x[, 2],  # Second principal component
+  deal = factor(df$deal, levels = c(0, 1), labels = c("not deal", "deal"))  # Convert deal status to factor with labels
+)
+
+# Plot the first two principal components with color representing deal status
+ggplot(pca_data, aes(x = PC1, y = PC2, color = deal)) +
+  geom_point(size = 2, alpha = 0.7) +  # Points with size 2 and some transparency
+  labs(title = "2D PCA of Shark Pitches", x = "Principal Component 1", y = "Principal Component 2") +
+  theme_minimal() +  # Use a clean, minimal theme
+  scale_color_manual(values = c("not deal" = "red", "deal" = "blue"))  # Customize colors for deal status
+
+# K-Means Clustering
+set.seed(1)  # Set seed for reproducibility
+
+# Scale the features for clustering
+scaled_clustering_features <- scale(clustering_features)
+
+# Perform K-Means clustering with different numbers of clusters
+km.2 <- kmeans(scaled_clustering_features, 2)  # 2 clusters
+km.3 <- kmeans(scaled_clustering_features, 3)  # 3 clusters
+km.4 <- kmeans(scaled_clustering_features, 4)  # 4 clusters
+km.5 <- kmeans(scaled_clustering_features, 5)  # 5 clusters
+
+# View results for 3 clusters
+km.3
+
+# Add cluster labels from the 4-cluster solution back to the original dataset
+df$cluster <- as.factor(km.4$cluster)  # Convert cluster labels to a factor for easier interpretation
+
+# Visualize the clusters in the PCA space
+ggplot(data = data.frame(pca_result$x), aes(PC1, PC2, color = df$cluster)) +
+  geom_point() +  # Plot PCA components with cluster color
+  labs(title = "Clustering of Shark Pitches", x = "Principal Component 1", y = "Principal Component 2") +
+  theme_minimal()  # Clean visualization style
+
+# Evaluate clustering performance by total within-cluster sum of squares
+km.2$tot.withinss  # Total within-cluster sum of squares for 2 clusters
+km.3$tot.withinss  # Total within-cluster sum of squares for 3 clusters
+km.4$tot.withinss  # Total within-cluster sum of squares for 4 clusters
+km.5$tot.withinss  # Total within-cluster sum of squares for 5 clusters
+
+# Summarize clusters by key features
+df_summary <- df %>%
+  group_by(cluster) %>%  # Group by cluster
+  summarise(
+    avg_valuation = mean(valuation, na.rm = TRUE),  # Average valuation for each cluster
+    avg_askedFor = mean(askedFor, na.rm = TRUE),  # Average funding requested for each cluster
+    avg_funding_ratio = mean(exchangeForStake, na.rm = TRUE),  # Average funding ratio (equity offered)
+    popularity_score_mean = mean(popularity_score, na.rm = TRUE),  # Average popularity score
+    successful_rate = mean(deal, na.rm = TRUE),  # Proportion of successful deals in each cluster
+    location_popular_mean = mean(location_success_rate, na.rm = TRUE),  # Average location success score
+    multiple_entreprenuers = mean(Multiple.Entreprenuers, na.rm = TRUE),  # Proportion of pitches with multiple entrepreneurs
+    category_popular_mean = mean(category_success_rate, na.rm = TRUE),  # Average category success rate
+    description_length_mean = mean(description_length, na.rm = TRUE),  # Average description length
+    count = n()  # Number of pitches in each cluster
+  )
+
+# Print the summarized cluster features
+print(df_summary)
+```
+
+
+```{r Feature Importance}
+# Load required libraries for decision trees and random forests
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+
+# Convert the target variable 'deal' into a factor for classification models
+df$deal <- as.factor(df$deal)
+
+# ----------------------------------------------
+# Random Forest Model 1: Comprehensive Feature Set
+# ----------------------------------------------
+
+# Train a random forest model using a wide set of features
+rf_model_1 <- randomForest(
+  deal ~ valuation + askedFor + exchangeForStake + interaction_term + 
+         category_success_rate + description_length + location_success_rate + 
+         Multiple.Entreprenuers + popularity_score + season,
+  data = df,  # Dataset to train on
+  importance = TRUE,  # Calculate feature importance
+  ntree = 2000,  # Number of trees to grow
+  cp = 0.0001,  # Complexity parameter for tree splitting
+  do.trace = 100  # Show progress every 100 trees
+)
+
+# Print the random forest model results
+rf_model_1
+
+# View the importance of features in the model
+importance(rf_model_1)
+
+# ----------------------------------------------
+# Random Forest Model 2: Reduced Feature Set
+# ----------------------------------------------
+
+# Train a random forest model with a smaller set of features
+rf_model_2 <- randomForest(
+  deal ~ valuation + exchangeForStake + interaction_term + 
+         category_success_rate + location_success_rate + Multiple.Entreprenuers,
+  data = df,  # Dataset to train on
+  importance = TRUE,  # Calculate feature importance
+  na.action = na.omit,  # Handle missing values by omitting them
+  ntree = 2000,  # Number of trees to grow
+  do.trace = 100,  # Show progress every 100 trees
+  cp = 0.0001  # Complexity parameter for tree splitting
+)
+
+# Print the random forest model results
+rf_model_2
+
+# View the importance of features in the model
+importance(rf_model_2)
+
+# ----------------------------------------------
+# Decision Tree Model 1: Basic Tree with Optimal Complexity Parameter
+# ----------------------------------------------
+
+# Train a decision tree model with a reduced set of features
+mytree <- rpart(
+  deal ~ valuation + exchangeForStake + interaction_term + 
+         category_success_rate + location_success_rate + Multiple.Entreprenuers,
+  data = df,  # Dataset to train on
+  control = rpart.control(cp = 0.0001)  # Complexity parameter for tree splitting
+)
+
+# Plot the decision tree
+rpart.plot(mytree)
+
+# Extract the optimal complexity parameter (cp) based on cross-validation
+opt_cp <- mytree$cptable[which.min(mytree$cptable[,"xerror"]), "CP"]
+opt_cp  # Print the optimal complexity parameter
+
+# ----------------------------------------------
+# Decision Tree Model 2: Pruned Tree with Optimal Complexity Parameter
+# ----------------------------------------------
+
+# Train a pruned decision tree using the optimal complexity parameter
+mytree <- rpart(
+  deal ~ valuation + exchangeForStake + interaction_term + 
+         category_success_rate + location_success_rate + Multiple.Entreprenuers,
+  data = df,  # Dataset to train on
+  control = rpart.control(cp = 0.006147541)  # Pruned tree with adjusted cp
+)
+
+# Plot the pruned decision tree
+rpart.plot(mytree)
+
+# ----------------------------------------------
+# Random Forest Model 3: Pruned Random Forest
+# ----------------------------------------------
+
+# Train a random forest model with pruning (using the adjusted cp value)
+rf_model_3 <- randomForest(
+  deal ~ valuation + exchangeForStake + interaction_term + 
+         category_success_rate + location_success_rate + Multiple.Entreprenuers,
+  data = df,  # Dataset to train on
+  importance = TRUE,  # Calculate feature importance
+  ntree = 2000,  # Number of trees to grow
+  do.trace = 100,  # Show progress every 100 trees
+  cp = 0.006147541  # Complexity parameter for pruning
+)
+
+# Print the random forest model results
+rf_model_3
+
+# View the importance of features in the pruned random forest
+importance(rf_model_3)
+
+```
+
+
+```{r logistic regression}
+# Define a range of k values for k-fold cross-validation
+k_values <- 2:10
+set.seed(1)  # Set seed for reproducibility
+
+# Initialize a vector to store classification error results for each k
+classification_error_results <- numeric(length(k_values))
+
+# Loop through each value of k
+for (k in k_values) {
+  # Create k folds for cross-validation
+  folds <- cut(seq(1, nrow(df)), breaks = k, labels = FALSE)
+  
+  # Initialize a vector to store classification errors for each fold
+  fold_classification_error <- numeric(k)
+  
+  # Perform cross-validation for the current k
+  for (i in 1:k) {
+    # Identify the indices for the test set for the current fold
+    test_idx <- which(folds == i, arr.ind = TRUE)
+    test_data <- df[test_idx, ]  # Create the test dataset
+    train_fold <- df[-test_idx, ]  # Create the training dataset
+    
+    # Train a logistic regression model on the training fold
+    mlogit <- glm(
+      deal ~ valuation + exchangeForStake + interaction_term + 
+             category_success_rate + location_success_rate + Multiple.Entreprenuers,
+      data = train_fold,
+      family = "binomial"  # Logistic regression for binary classification
+    )
+    
+    # Predict probabilities on the test set
+    predictions <- predict(mlogit, newdata = test_data, type = "response")
+    
+    # Convert probabilities to binary predictions (threshold = 0.5)
+    predicted_class <- ifelse(predictions > 0.5, 1, 0)
+    
+    # Convert actual deal values to numeric for comparison
+    actual_class <- as.numeric(test_data$deal) - 1  # Assuming levels are 0 and 1
+    
+    # Calculate classification error for the current fold
+    fold_classification_error[i] <- mean(predicted_class != actual_class) * 100  # Percentage error
+  }
+  
+  # Store the average classification error for the current k
+  classification_error_results[k - 1] <- mean(fold_classification_error)
+}
+
+# Combine k values and classification error results into a data frame for visualization
+cv_results <- data.frame(k = k_values, ClassificationError = classification_error_results)
+
+# View the cross-validation results
+print(cv_results)
+
+# Visualize the relationship between k and classification error
+library(ggplot2)
+ggplot(cv_results, aes(x = k, y = ClassificationError)) +
+  geom_line() +  # Line plot
+  geom_point(size = 2) +  # Add points
+  labs(
+    title = "Classification Error vs. Number of Folds in Cross-Validation",
+    x = "Number of Folds (k)",
+    y = "Classification Error (%)"
+  ) +
+  theme_minimal()  # Minimal theme for cleaner visualization
+
+# Calculate Variance Inflation Factor (VIF) to check for multicollinearity
+vif_values <- vif(mlogit)  # Calculate VIF for logistic regression model
+print(vif_values)  # Print VIF values
+```
+
+
+```{r Boosting Model}
+# Load the gbm library for Boosting
+library(gbm)
+set.seed(1)  # Set seed for reproducibility
+
+# Ensure the target variable is numeric for boosting (convert factor levels to 0 and 1)
+df$deal <- as.numeric(df$deal) - 1
+
+# Define the range of k values for cross-validation
+k_values <- 2:10
+
+# Initialize a vector to store classification error results for boosting
+classification_error_results <- numeric(length(k_values))
+
+# Loop through each value of k
+for (k in k_values) {
+  # Create k folds for cross-validation
+  folds <- cut(seq(1, nrow(df)), breaks = k, labels = FALSE)
+  
+  # Initialize a vector to store classification errors for each fold
+  fold_classification_error <- numeric(k)
+  
+  # Perform cross-validation for the current k
+  for (i in 1:k) {
+    # Identify the indices for the test set for the current fold
+    test_idx <- which(folds == i, arr.ind = TRUE)
+    test_data <- df[test_idx, ]  # Create the test dataset
+    train_fold <- df[-test_idx, ]  # Create the training dataset
+    
+    # Train the boosting model on the training fold
+    boosted <- gbm(
+      deal ~ valuation + exchangeForStake + interaction_term + 
+             category_success_rate + location_success_rate + Multiple.Entreprenuers,
+      data = train_fold,  # Training dataset
+      distribution = "bernoulli",  # Distribution for binary classification
+      n.trees = 20000,  # Number of trees
+      interaction.depth = 4  # Depth of each tree
+    )
+    
+    # Predict class probabilities on the test set
+    predicted_probabilities <- predict(boosted, newdata = test_data, n.trees = 20000, type = "response")
+    
+    # Convert probabilities to binary predictions (threshold = 0.5)
+    predicted_class <- ifelse(predicted_probabilities > 0.5, 1, 0)
+    
+    # Calculate classification error for the current fold
+    fold_classification_error[i] <- mean(predicted_class != test_data$deal) * 100  # Percentage error
+  }
+  
+  # Store the average classification error for the current k
+  classification_error_results[k - 1] <- mean(fold_classification_error)
+}
+
+# Combine k values and classification error results into a data frame
+cv_results <- data.frame(k = k_values, ClassificationError = classification_error_results)
+
+# View the cross-validation results for Boosting
+print(cv_results)
+
+# Print summary of the last trained boosting model
+summary(boosted)  # Feature importance and partial dependence
+```
+
